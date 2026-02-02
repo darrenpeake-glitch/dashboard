@@ -15,8 +15,10 @@ import {
   RotateCcw,
 } from "lucide-react";
 
-import { loadState, saveState, storageKey } from "./lib/storage";
+import { loadState, saveState, storageKey, normalizeImported } from "./lib/storage";
 import { Card, PillButton, MiniLink, Stat } from "./components/ui";
+
+const DAY = 24 * 60 * 60 * 1000;
 
 function formatTime(s) {
   const hh = String(Math.floor(s / 3600)).padStart(2, "0");
@@ -25,9 +27,15 @@ function formatTime(s) {
   return `${hh}:${mm}:${ss}`;
 }
 
-function SidebarItem({ icon: Icon, label, active, badge }) {
+function SidebarItem({ icon: Icon, label, active, badge, onClick }) {
   return (
     <div
+      onClick={onClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") onClick?.();
+      }}
       className={`flex items-center gap-3 rounded-xl px-3 py-2 cursor-pointer select-none ${
         active ? "bg-emerald-50 text-emerald-800" : "text-slate-700 hover:bg-slate-50"
       }`}
@@ -49,6 +57,12 @@ function SidebarItem({ icon: Icon, label, active, badge }) {
 
 function now() {
   return Date.now();
+}
+
+function startOfToday(ts) {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
 function matchesSearch(q, ...fields) {
@@ -74,6 +88,38 @@ export default function App() {
 
   useEffect(() => saveState(state), [state]);
 
+  // Section refs for sidebar + icons
+  const topRef = useRef(null);
+  const analyticsRef = useRef(null);
+  const remindersRef = useRef(null);
+  const tasksRef = useRef(null);
+  const threadsRef = useRef(null);
+  const scratchRef = useRef(null);
+
+  const activeView = state.ui?.activeView || "dashboard";
+
+  const setActiveView = (view) => {
+    setState((s) => ({
+      ...s,
+      ui: { ...(s.ui || {}), activeView: view },
+    }));
+  };
+
+  const scrollToRef = (ref) => {
+    const el = ref?.current;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const goView = (view) => {
+    setActiveView(view);
+    if (view === "dashboard") return scrollToRef(topRef);
+    if (view === "analytics") return scrollToRef(analyticsRef);
+    if (view === "calendar") return scrollToRef(remindersRef);
+    if (view === "tasks") return scrollToRef(tasksRef);
+    if (view === "team") return scrollToRef(threadsRef);
+  };
+
   // Timer tick
   useEffect(() => {
     if (!state.timer.running) return;
@@ -82,15 +128,6 @@ export default function App() {
     }, 1000);
     return () => clearInterval(t);
   }, [state.timer.running]);
-
-  const k = state.kpis;
-
-  const weeklyBars = useMemo(() => {
-    const base = (k.momentum || 1) + 2;
-    return [3, base + 1, base + 2, base + 3, base, base - 1, base + 1].map((v) =>
-      Math.max(2, Math.min(10, v))
-    );
-  }, [k.momentum]);
 
   // ---- Search + Filters (persisted) ----
   const search = state.ui?.search || "";
@@ -111,7 +148,6 @@ export default function App() {
 
   // ---- Lightweight undo for deletes (not persisted) ----
   const [undo, setUndo] = useState(null);
-  // undo = { kind: "action"|"thread", item: {...}, index: number, expiresAt: number }
   const undoTimerRef = useRef(null);
 
   function clearUndoTimer() {
@@ -154,19 +190,40 @@ export default function App() {
   const toggleAction = (id) =>
     setState((s) => ({
       ...s,
-      nextActions: s.nextActions.map((a) =>
-        a.id === id ? { ...a, done: !a.done, updatedAt: now() } : a
-      ),
+      nextActions: s.nextActions.map((a) => {
+        if (a.id !== id) return a;
+        const nextDone = !a.done;
+        const t = now();
+        return {
+          ...a,
+          done: nextDone,
+          updatedAt: t,
+          completedAt: nextDone ? t : null,
+        };
+      }),
     }));
 
   const addAction = () => {
     const text = prompt("Next action (keep it tiny):");
     if (!text) return;
+    const domain = prompt(
+      "Domain (optional): Health & Energy / Business / Home & Family / Money & Admin / Media Machine / Homelab / Personal AI (OpenClaw)"
+    ) || "";
+    const t = now();
     setState((s) => ({
       ...s,
-      nextActions: [{ id: crypto.randomUUID(), text, done: false, createdAt: now(), updatedAt: now() }, ...s.nextActions]
-        .slice(0, 12),
-      kpis: { ...s.kpis, openLoops: Math.max(0, (s.kpis?.openLoops || 0) + 1) },
+      nextActions: [
+        {
+          id: crypto.randomUUID(),
+          text,
+          done: false,
+          domain,
+          createdAt: t,
+          updatedAt: t,
+          completedAt: null,
+        },
+        ...s.nextActions,
+      ].slice(0, 12),
     }));
   };
 
@@ -182,21 +239,23 @@ export default function App() {
     });
   };
 
-  // ---- Threads: add + "touch" + delete (Alt/Option-click) ----
+  // ---- Threads: add + touch + delete (Alt/Option-click) ----
   const addThread = () => {
     const title = prompt("Thread name:");
     if (!title) return;
     const note = prompt("1-line note (optional):") || "";
+    const t = now();
     setState((s) => ({
       ...s,
-      threads: [{ id: crypto.randomUUID(), title, note, createdAt: now(), updatedAt: now() }, ...s.threads].slice(0, 12),
+      threads: [{ id: crypto.randomUUID(), title, note, createdAt: t, updatedAt: t }, ...s.threads].slice(0, 12),
     }));
   };
 
   const touchThread = (id) => {
+    const t = now();
     setState((s) => ({
       ...s,
-      threads: s.threads.map((t) => (t.id === id ? { ...t, updatedAt: now() } : t)),
+      threads: s.threads.map((th) => (th.id === id ? { ...th, updatedAt: t } : th)),
     }));
   };
 
@@ -212,28 +271,47 @@ export default function App() {
     });
   };
 
-  // ---- Filtered + sorted views ----
-  const shownActions = useMemo(() => {
-    let arr = state.nextActions || [];
+  // ---- Reminders: add + start ----
+  const addReminder = () => {
+    const title = prompt("Reminder title:") || "";
+    if (!title.trim()) return;
+    const when = prompt("When (human-friendly):", "Today") || "Today";
+    const t = now();
+    setState((s) => ({
+      ...s,
+      reminders: [
+        {
+          id: crypto.randomUUID(),
+          title: title.trim(),
+          when,
+          cta: "Start",
+          status: "pending",
+          createdAt: t,
+          updatedAt: t,
+          startedAt: null,
+        },
+        ...s.reminders,
+      ].slice(0, 8),
+    }));
+  };
 
-    if (actionsFilter !== "all") {
-      arr = arr.filter((a) => (actionsFilter === "done" ? a.done : !a.done));
-    }
-
-    arr = arr.filter((a) => matchesSearch(search, a.text, a.done ? "done" : "open"));
-
-    // Most recently touched at top
-    arr = arr.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-
-    return arr;
-  }, [state.nextActions, actionsFilter, search]);
-
-  const shownThreads = useMemo(() => {
-    let arr = state.threads || [];
-    arr = arr.filter((t) => matchesSearch(search, t.title, t.note));
-    arr = arr.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return arr;
-  }, [state.threads, search]);
+  const startReminder = (id) => {
+    const t = now();
+    setState((s) => {
+      const r = s.reminders.find((x) => x.id === id);
+      const title = r?.title || "Focus";
+      return {
+        ...s,
+        focusNow: { ...s.focusNow, current: title },
+        timer: { ...s.timer, running: true },
+        reminders: s.reminders.map((x) =>
+          x.id === id
+            ? { ...x, status: "in_progress", startedAt: x.startedAt ?? t, updatedAt: t }
+            : x
+        ),
+      };
+    });
+  };
 
   // ---- Export/Import JSON (from Add menu) ----
   const importInputRef = useRef(null);
@@ -241,7 +319,7 @@ export default function App() {
   const doExport = () => {
     const payload = {
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       key: storageKey(),
       state,
     };
@@ -259,17 +337,9 @@ export default function App() {
       return;
     }
 
-    // Accept {state:{...}} or raw state object
-    const incoming = parsed && typeof parsed === "object" && parsed.state ? parsed.state : parsed;
-
-    if (!incoming || typeof incoming !== "object") {
-      alert("Import failed: expected an object.");
-      return;
-    }
-
     setUndo(null);
     clearUndoTimer();
-    setState(() => incoming);
+    setState(() => normalizeImported(parsed));
   };
 
   const addMenu = () => {
@@ -294,8 +364,79 @@ export default function App() {
 
   const resetTimer = () => setState((s) => ({ ...s, timer: { running: false, seconds: 0 } }));
 
+  // ---- Computed KPIs + analytics ----
+  const analytics = useMemo(() => {
+    const tNow = now();
+
+    const openLoops = (state.nextActions || []).filter((a) => !a.done).length;
+
+    const waitingOn = (state.nextActions || []).filter((a) => {
+      const txt = String(a.text || "").toLowerCase();
+      const dom = String(a.domain || "").toLowerCase();
+      return txt.includes("waiting on") || dom.includes("waiting");
+    }).length;
+
+    const activeThreads = (state.threads || []).filter((t) => tNow - (t.updatedAt || 0) <= 7 * DAY).length;
+
+    // Momentum = actions completed in last 7 days
+    const completedLast7 = (state.nextActions || []).filter(
+      (a) => a.done && a.completedAt && tNow - a.completedAt <= 7 * DAY
+    );
+
+    const momentum = completedLast7.length;
+
+    // Bars by day (oldest..today)
+    const bins = new Array(7).fill(0);
+    for (const a of completedLast7) {
+      const days = Math.floor((startOfToday(tNow) - startOfToday(a.completedAt)) / DAY);
+      if (days >= 0 && days < 7) {
+        // today -> 0; we want oldest..today => index = 6-days
+        bins[6 - days] += 1;
+      }
+    }
+
+    return { openLoops, waitingOn, activeThreads, momentum, bins };
+  }, [state.nextActions, state.threads]);
+
+  const weeklyBars = useMemo(() => {
+    const max = Math.max(1, ...analytics.bins);
+    // Map count -> height steps 2..10
+    return analytics.bins.map((c) => {
+      const scaled = Math.round((c / max) * 8) + 2;
+      return Math.max(2, Math.min(10, scaled));
+    });
+  }, [analytics.bins]);
+
+  // ---- Filtered + sorted views ----
+  const shownActions = useMemo(() => {
+    let arr = state.nextActions || [];
+
+    if (actionsFilter !== "all") {
+      arr = arr.filter((a) => (actionsFilter === "done" ? a.done : !a.done));
+    }
+
+    arr = arr.filter((a) => matchesSearch(search, a.text, a.domain, a.done ? "done" : "open"));
+
+    // Most recently touched at top
+    arr = arr.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    return arr;
+  }, [state.nextActions, actionsFilter, search]);
+
+  const shownThreads = useMemo(() => {
+    let arr = state.threads || [];
+    arr = arr.filter((t) => matchesSearch(search, t.title, t.note));
+    arr = arr.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return arr;
+  }, [state.threads, search]);
+
+  const tasksBadge = useMemo(() => {
+    const open = (state.nextActions || []).filter((a) => !a.done).length;
+    return open > 9 ? "9+" : String(open || "");
+  }, [state.nextActions]);
+
   return (
-    <div className="min-h-screen p-6">
+    <div className="min-h-screen p-6" ref={topRef}>
       <input
         ref={importInputRef}
         type="file"
@@ -317,19 +458,38 @@ export default function App() {
                   <div className="h-2 w-2 rounded-full bg-emerald-700 absolute right-0 top-0 translate-x-1/3 -translate-y-1/3" />
                 </div>
               </div>
-
-              {/* Title: changed only */}
               <div className="font-extrabold text-lg">Occono Done</div>
             </div>
 
             <div className="mt-8">
               <div className="text-xs font-bold text-slate-400 px-2 mb-2">MENU</div>
               <div className="space-y-1">
-                <SidebarItem icon={LayoutDashboard} label="Dashboard" active />
-                <SidebarItem icon={CheckSquare} label="Tasks" badge="12+" />
-                <SidebarItem icon={CalendarDays} label="Calendar" />
-                <SidebarItem icon={BarChart3} label="Analytics" />
-                <SidebarItem icon={Users} label="Team" />
+                <SidebarItem
+                  icon={LayoutDashboard}
+                  label="Dashboard"
+                  active={activeView === "dashboard"}
+                  onClick={() => goView("dashboard")}
+                />
+                <SidebarItem
+                  icon={CheckSquare}
+                  label="Tasks"
+                  badge={tasksBadge || undefined}
+                  active={activeView === "tasks"}
+                  onClick={() => goView("tasks")}
+                />
+                <SidebarItem
+                  icon={CalendarDays}
+                  label="Calendar"
+                  active={activeView === "calendar"}
+                  onClick={() => goView("calendar")}
+                />
+                <SidebarItem
+                  icon={BarChart3}
+                  label="Analytics"
+                  active={activeView === "analytics"}
+                  onClick={() => goView("analytics")}
+                />
+                <SidebarItem icon={Users} label="Team" active={activeView === "team"} onClick={() => goView("team")} />
               </div>
             </div>
 
@@ -366,10 +526,18 @@ export default function App() {
               </div>
 
               <div className="ml-auto flex items-center gap-3">
-                <div className="h-10 w-10 rounded-full bg-white border border-slate-200 grid place-items-center hover:bg-slate-50 cursor-pointer">
+                <div
+                  className="h-10 w-10 rounded-full bg-white border border-slate-200 grid place-items-center hover:bg-slate-50 cursor-pointer"
+                  title="Jump to Scratchpad"
+                  onClick={() => scrollToRef(scratchRef)}
+                >
                   <Mail size={18} className="text-slate-700" />
                 </div>
-                <div className="h-10 w-10 rounded-full bg-white border border-slate-200 grid place-items-center hover:bg-slate-50 cursor-pointer">
+                <div
+                  className="h-10 w-10 rounded-full bg-white border border-slate-200 grid place-items-center hover:bg-slate-50 cursor-pointer"
+                  title="Quick add reminder"
+                  onClick={addReminder}
+                >
                   <Bell size={18} className="text-slate-700" />
                 </div>
               </div>
@@ -389,32 +557,32 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-4 mt-6">
+              <div className="grid grid-cols-4 gap-4 mt-6" ref={analyticsRef}>
                 <Card
                   title="Active Threads"
                   right={<MiniLink />}
                   className="bg-gradient-to-br from-emerald-800 to-emerald-600 text-white border-0"
                 >
-                  <div className="text-5xl font-extrabold">{k.activeThreads}</div>
-                  <div className="mt-2 text-xs text-white/80">What you’re actively juggling</div>
+                  <div className="text-5xl font-extrabold">{analytics.activeThreads}</div>
+                  <div className="mt-2 text-xs text-white/80">Threads touched in the last 7 days</div>
                 </Card>
 
                 <Card title="Open Loops" right={<MiniLink />}>
-                  <Stat big={k.openLoops} label="Unclosed items" sub="Reduce this to feel lighter" />
+                  <Stat big={analytics.openLoops} label="Open actions" sub="Close one, feel lighter" />
                 </Card>
 
                 <Card title="Waiting On" right={<MiniLink />}>
-                  <Stat big={k.waitingOn} label="Blocked / pending" sub="External dependencies" />
+                  <Stat big={analytics.waitingOn} label="Blocked / pending" sub="External dependencies" />
                 </Card>
 
                 <Card title="Momentum" right={<MiniLink />}>
-                  <Stat big={k.momentum} label="Wins this week" sub="Output > planning" />
+                  <Stat big={analytics.momentum} label="Done (last 7 days)" sub="Small wins stack" />
                 </Card>
               </div>
 
               <div className="grid grid-cols-3 gap-4 mt-4">
                 <Card title="Momentum Pattern">
-                  <div className="text-xs text-slate-500 mb-3">A lightweight weekly signal (Stage 1)</div>
+                  <div className="text-xs text-slate-500 mb-3">Completions over the last 7 days</div>
                   <div className="flex items-end gap-3 h-28">
                     {weeklyBars.map((h, i) => (
                       <div key={i} className="flex-1 flex flex-col items-center gap-2">
@@ -431,12 +599,13 @@ export default function App() {
                 </Card>
 
                 <Card title="Reminders">
+                  <div ref={remindersRef} />
                   {state.reminders.map((r) => (
                     <div key={r.id} className="space-y-2">
                       <div className="text-xl font-extrabold text-emerald-900 leading-tight">{r.title}</div>
                       <div className="text-sm text-slate-500">{r.when}</div>
-                      <PillButton onClick={() => alert("Stage 1: stub")}>
-                        <Play size={16} /> {r.cta}
+                      <PillButton onClick={() => startReminder(r.id)}>
+                        <Play size={16} /> {r.status === "in_progress" ? "In Progress" : r.cta}
                       </PillButton>
                     </div>
                   ))}
@@ -462,6 +631,7 @@ export default function App() {
                     </div>
                   }
                 >
+                  <div ref={tasksRef} />
                   <div className="space-y-2">
                     {shownActions.slice(0, 7).map((a) => (
                       <label
@@ -511,6 +681,7 @@ export default function App() {
                     </button>
                   }
                 >
+                  <div ref={threadsRef} />
                   <div className="space-y-3">
                     {shownThreads.slice(0, 8).map((t) => (
                       <div
@@ -543,6 +714,7 @@ export default function App() {
                 </Card>
 
                 <Card title="Scratchpad Inbox">
+                  <div ref={scratchRef} />
                   <textarea
                     value={state.scratchpad.text}
                     onChange={(e) => setState((s) => ({ ...s, scratchpad: { text: e.target.value } }))}
@@ -606,4 +778,3 @@ export default function App() {
     </div>
   );
 }
-
